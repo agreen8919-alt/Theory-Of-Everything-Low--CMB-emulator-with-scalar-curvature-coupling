@@ -1,0 +1,186 @@
+"""
+Low-ℓ CMB emulator with scalar–curvature coupling (ξ R φ²)
+Colab/Jupyter-friendly version — no argparse, just set parameters below.
+
+Outputs:
+  - CSVs: <tag>_dCl_TT.csv, <tag>_dCl_EE.csv, <tag>_dCl_TE.csv in ./out/
+  - Inline plots plus saved PNGs: panel_dCl.png, panel_Geff_eta.png
+"""
+
+import os
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# -------------------------
+# Core physics functions
+# -------------------------
+
+MPL = 1.0  # Planck mass in reduced Planck units
+
+def M_star_sq(phi_bar, xi):
+    return MPL**2 - 2.0 * xi * phi_bar**2
+
+def beta(phi_bar, xi):
+    Ms2 = M_star_sq(phi_bar, xi)
+    return -2.0 * xi * phi_bar * MPL / Ms2
+
+def G_eff(a, k, xi, m_eff, phi_bar):
+    k_m = a * (m_eff / 1e-30) * 1e-3
+    b = beta(phi_bar, xi)
+    ratio = (2.0 * b**2 * k**2) / (k**2 + k_m**2 + 1e-30)
+    return (MPL**2 / M_star_sq(phi_bar, xi)) * (1.0 + ratio)
+
+def eta_slip(a, k, xi, m_eff, phi_bar):
+    k_m = a * (m_eff / 1e-30) * 1e-3
+    b = beta(phi_bar, xi)
+    num = -(2.0 * b**2 * k**2) / (k**2 + k_m**2 + 1e-30)
+    den = 1.0 + (2.0 * b**2 * k**2) / (k**2 + k_m**2 + 1e-30)
+    return num / den
+
+def cosmic_variance(Cl):
+    ells = np.arange(len(Cl))
+    sigma = np.zeros_like(Cl)
+    idx = ells >= 2
+    sigma[idx] = np.sqrt(2.0 / (2.0 * ells[idx] + 1.0))
+    return sigma
+
+def baseline_Cl_lowell(ell_max):
+    ells = np.arange(ell_max + 1)
+    TT = np.zeros_like(ells, dtype=float)
+    EE = np.zeros_like(ells, dtype=float)
+    TE = np.zeros_like(ells, dtype=float)
+    idx = ells >= 2
+    TT[idx] = 1.0 / (ells[idx] * (ells[idx] + 1.0))
+    EE[idx] = 0.05 * TT[idx]
+    TE[idx] = 0.2  * TT[idx]
+    return ells, TT, EE, TE
+
+def los_emulator_dCl(ell_max, xi, m_eff, phi_bar, chi_star=14000.0):
+    ells, TT0, EE0, TE0 = baseline_Cl_lowell(ell_max)
+    dTT = np.zeros_like(TT0)
+    dEE = np.zeros_like(EE0)
+    dTE = np.zeros_like(TE0)
+    a_grid = np.linspace(1/1100, 1.0, 200)
+
+    for ell in range(2, ell_max + 1):
+        k = max(ell / chi_star, 1e-6)
+        Ge = np.array([G_eff(a, k, xi, m_eff, phi_bar) for a in a_grid])
+        et = np.array([eta_slip(a, k, xi, m_eff, phi_bar) for a in a_grid])
+        SW_frac = Ge[0] - 1.0
+        dGe = np.gradient(Ge, a_grid)
+        det  = np.gradient(et, a_grid)
+        ISW_proxy = np.sqrt(np.mean((dGe + det)**2))
+        frac = 0.6 * SW_frac + 0.2 * ISW_proxy
+        dTT[ell] = frac
+        dEE[ell] = 0.5 * frac
+        dTE[ell] = 0.7 * frac
+
+    return ells, dTT, dEE, dTE, TT0, EE0, TE0
+
+# -------------------------
+# Utility functions
+# -------------------------
+
+def ensure_outdir(path="out"):
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def save_csv(ells, dCl, filename, outdir):
+    df = pd.DataFrame({"ell": ells, "frac_shift": dCl})
+    df.to_csv(os.path.join(outdir, filename), index=False)
+
+def plot_dCl(ells, dTT, dEE, dTE, TT0, title):
+    sigma = cosmic_variance(TT0)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    idx = ells >= 2
+    ax.fill_between(ells[idx], -sigma[idx], sigma[idx], color="gray", alpha=0.3,
+                    label="cosmic variance (TT)")
+    ax.plot(ells[idx], dTT[idx], label="ΔCℓ/Cℓ (TT)", color="#1f77b4")
+    ax.plot(ells[idx], dEE[idx], label="ΔCℓ/Cℓ (EE)", color="#ff7f0e")
+    ax.plot(ells[idx], dTE[idx], label="ΔCℓ/Cℓ (TE)", color="#2ca02c")
+    ax.axhline(0, color="black", lw=0.8)
+    ax.set_xlabel("Multipole ℓ")
+    ax.set_ylabel("Fractional shift ΔCℓ/Cℓ")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+    fig.savefig(os.path.join("out", "panel_dCl.png"), dpi=200)
+    plt.close(fig)
+
+def plot_Geff_eta(xi, m_eff, phi_bar, title):
+    a = 1.0
+    ks = np.logspace(-5, -1, 200)
+    Ge = np.array([G_eff(a, k, xi, m_eff, phi_bar) for k in ks])
+    et = np.array([eta_slip(a, k, xi, m_eff, phi_bar) for k in ks])
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].plot(ks, Ge, color="#1f77b4")
+    axes[0].axhline(1.0, color="black", ls="--")
+    axes[0].set_xscale("log")
+    axes[0].set_xlabel("k [1/Mpc]")
+    axes[0].set_ylabel("G_eff/G")
+    axes[0].set_title("Effective coupling G_eff at z=0")
+
+    axes[1].plot(ks, et, color="#ff7f0e")
+    axes[1].axhline(0.0, color="black", ls="--")
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel("k [1/Mpc]")
+    axes[1].set_ylabel("η = Φ/Ψ − 1")
+    axes[1].set_title("Slip parameter η at z=0")
+
+    fig.suptitle(title, y=1.02)
+    fig.tight_layout()
+    plt.show()
+    fig.savefig(os.path.join("out", "panel_Geff_eta.png"), dpi=200)
+    plt.close(fig)
+
+# -------------------------
+# Main execution
+# -------------------------
+
+def main(xi, m_eff, phi_bar, ell_max, outdir):
+    ensure_outdir(outdir)
+    tag = f"xi{xi}_m{m_eff}_phi{phi_bar}"
+    ells, dTT, dEE, dTE, TT0, EE0, TE0 = los_emulator_dCl(ell_max, xi, m_eff, phi_bar)
+
+    # Save CSVs
+    save_csv(ells, dTT, f"{tag}_dCl_TT.csv", outdir)
+    save_csv(ells, dEE, f"{tag}_dCl_EE.csv", outdir)
+    save_csv(ells, dTE, f"{tag}_dCl_TE.csv", outdir)
+
+    # Plot inline and save
+    plot_dCl(ells, dTT, dEE, dTE, TT0,
+             title=f"Low-ℓ CMB shifts (ξ={xi}, m_eff={m_eff}, φ̄={phi_bar})")
+    plot_Geff_eta(xi, m_eff, phi_bar,
+                  title=f"G_eff & η (ξ={xi}, m_eff={m_eff})")
+
+    print(f"[DONE] Outputs saved in '{outdir}/'")
+
+def in_notebook():
+    try:
+        get_ipython  # noqa
+        return True
+    except NameError:
+        return False
+
+if __name__ == "__main__":
+    if in_notebook():
+        # Defaults for notebook
+        xi, m_eff, phi_bar = 1e-3, 1e-30, 0.05
+        ell_max, outdir = 50, "out"
+    else:
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--xi",      type=float, required=True)
+        parser.add_argument("--m_eff",   type=float, required=True)
+        parser.add_argument("--phi_bar", type=float, required=True)
+        parser.add_argument("--ell_max", type=int,   default=50)
+        parser.add_argument("--outdir",  type=str,   default="out")
+        args = parser.parse_args()
+        xi, m_eff, phi_bar = args.xi, args.m_eff, args.phi_bar
+        ell_max, outdir = args.ell_max, args.outdir
+
+    main(xi, m_eff, phi_bar, ell_max, outdir)
